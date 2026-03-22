@@ -1,0 +1,16 @@
+# nixpacks.toml — Railway build configuration
+# Installs torch CPU first, then all other packages normally
+# This avoids the 2GB CUDA download while keeping all deps intact
+
+[phases.setup]
+nixPkgs = ["python311", "libsqlite"]
+
+[phases.install]
+cmds = [
+  "pip install --upgrade pip setuptools wheel",
+  "pip install torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu",
+  "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
