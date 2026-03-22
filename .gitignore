@@ -1,0 +1,34 @@
+# Environment — NEVER commit
+.env
+.env.local
+
+# Local data — Railway uses PostgreSQL + ChromaDB server
+chatdeva.db
+chroma_db/
+vector_store/
+
+# Uploaded docs — re-upload via admin panel after deploy
+uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
