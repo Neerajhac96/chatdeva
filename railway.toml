@@ -1,0 +1,13 @@
+# railway.toml — Backend service configuration
+# This file lives in your repo root.
+# Railway reads this to know how to start the FastAPI backend.
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
