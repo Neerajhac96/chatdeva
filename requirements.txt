@@ -1,7 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────
 # ChatDEVA v2 — Production Requirements
-# NOTE: torch is installed separately in nixpacks.toml (CPU-only wheel)
-#       Do NOT add torch here — it will override the CPU install
+# torch installed separately in Dockerfile (CPU-only wheel)
 # ─────────────────────────────────────────────────────────────────────
 
 # ── Web framework ─────────────────────────────────────────────────────
@@ -21,9 +20,9 @@ python-jose[cryptography]==3.3.0
 sqlalchemy==2.0.30
 psycopg2-binary==2.9.9
 
-# ── LangChain ─────────────────────────────────────────────────────────
+# ── LangChain (versions confirmed available on PyPI) ──────────────────
 langchain==0.1.20
-langchain-community==0.1.20
+langchain-community==0.0.38
 langchain-core==0.1.53
 langchain-text-splitters==0.0.2
 langchain-huggingface==0.0.3
