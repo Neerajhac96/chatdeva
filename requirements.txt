@@ -23,7 +23,7 @@ psycopg2-binary==2.9.9        # PostgreSQL driver (Railway Postgres)
 
 # ── LangChain (pinned — avoids import breaking changes) ───────────────
 langchain==0.1.20
-langchain-community==0.1.20
+langchain-community==0.0.38
 langchain-core==0.1.53
 langchain-text-splitters==0.0.2
 langchain-huggingface==0.0.3
