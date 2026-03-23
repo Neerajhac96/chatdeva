@@ -26,8 +26,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy full project
 COPY . .
 
-# Copy streamlit config
-COPY .streamlit /app/.streamlit
+# Copy streamlit config (optional)
+RUN mkdir -p /app/.streamlit
+COPY .streamlit* /app/.streamlit/
 
 # Create necessary directories
 RUN mkdir -p /tmp/chatdeva_uploads /tmp/chatdeva_vectors
