@@ -143,6 +143,31 @@ def ask(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
 
+    # [PHASE 8] Usage limit check — students only, admins/staff unlimited
+    if current_user.role.value == "student":
+        from models import College
+        from datetime import date
+        college = db.query(College).filter_by(id=current_user.college_id).first()
+        monthly_limit = college.monthly_limit if college else 100
+
+        # Reset counter if new month
+        current_month = date.today().strftime("%Y-%m")
+        if current_user.last_reset_date != current_month:
+            current_user.questions_this_month = 0
+            current_user.last_reset_date = current_month
+            db.commit()
+
+        # Block if limit reached
+        if current_user.questions_this_month >= monthly_limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Monthly limit of {monthly_limit} questions reached. "                       f"Please contact your college admin to upgrade the plan."
+            )
+
+        # Increment counter
+        current_user.questions_this_month += 1
+        db.commit()
+
     # Save user message
     user_msg = ChatMessage(
         session_id=session.id,

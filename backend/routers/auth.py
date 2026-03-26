@@ -195,3 +195,107 @@ def login(
 def get_me(current_user: User = Depends(get_current_user)):
     """Returns the currently authenticated user's profile."""
     return current_user
+
+
+# ── [PHASE 8] College self-registration ──────────────────────────────
+@router.post("/colleges/register", response_model=dict, status_code=201)
+def register_college(
+    name:          str,
+    code:          str,
+    contact_email: str,
+    admin_username: str,
+    admin_password: str,
+    db: Session = Depends(get_db),
+):
+    """
+    [PHASE 8] Public endpoint — any college can self-register.
+    Creates:
+      1. A new college (free plan, 100 questions/student/month)
+      2. An admin account for that college
+
+    This is the SaaS onboarding flow — no manual setup needed.
+    """
+    # Check college code not taken
+    if db.query(College).filter_by(code=code.upper()).first():
+        raise HTTPException(status_code=400, detail="College code already exists.")
+
+    # Check admin username not taken
+    if db.query(User).filter_by(username=admin_username).first():
+        raise HTTPException(status_code=400, detail="Admin username already taken.")
+
+    if len(admin_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+
+    # Create college
+    college = College(
+        name=name,
+        code=code.upper(),
+        contact_email=contact_email,
+    )
+    db.add(college)
+    db.commit()
+    db.refresh(college)
+
+    # Create admin for this college
+    password_hash = bcrypt.hashpw(
+        admin_password.encode("utf-8"),
+        bcrypt.gensalt(rounds=12),
+    ).decode("utf-8")
+
+    admin = User(
+        username=admin_username,
+        password_hash=password_hash,
+        role=UserRole.admin,
+        college_id=college.id,
+    )
+    db.add(admin)
+    db.commit()
+
+    logger.info(f"✅ College registered: {college.code} | Admin: {admin_username}")
+    return {
+        "message": "College registered successfully!",
+        "college_id": college.id,
+        "college_name": college.name,
+        "college_code": college.code,
+        "plan": "free",
+        "monthly_limit": 100,
+        "admin_username": admin_username,
+    }
+
+
+# ── [PHASE 8] Usage endpoint ─────────────────────────────────────────
+@router.get("/usage", response_model=dict)
+def get_my_usage(
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+):
+    """
+    [PHASE 8] Returns current user's usage stats.
+    Students can see how many questions they've used this month.
+    """
+    from models import College
+    from datetime import date
+
+    college = db.query(College).filter_by(id=current_user.college_id).first()
+    monthly_limit = college.monthly_limit if college else 100
+    plan          = college.plan.value if college else "free"
+
+    # Reset if new month
+    current_month = date.today().strftime("%Y-%m")
+    if current_user.last_reset_date != current_month:
+        current_user.questions_this_month = 0
+        current_user.last_reset_date = current_month
+        db.commit()
+
+    used      = current_user.questions_this_month
+    remaining = max(0, monthly_limit - used)
+
+    return {
+        "username":       current_user.username,
+        "plan":           plan,
+        "monthly_limit":  monthly_limit,
+        "used":           used,
+        "remaining":      remaining,
+        "reset_on":       f"1st of next month",
+        "is_admin":       current_user.role.value in ("admin", "staff"),
+    }

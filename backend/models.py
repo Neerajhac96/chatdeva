@@ -1,16 +1,11 @@
 """
-models.py — SQLAlchemy ORM models
------------------------------------
-All database tables defined here.
-Relationships are explicit so queries are clean and type-safe.
-
-Tables:
-  users         — accounts with role + college isolation
-  colleges      — college registry (optional expansion)
-  documents     — uploaded file metadata per college
-  chat_sessions — named conversation threads per user
-  chat_messages — individual messages within a session
-  audit_logs    — optional security audit trail
+models.py — Phase 8: SaaS models added
+----------------------------------------
+Changes from previous version:
+  - College: added plan, monthly_limit, contact_email, is_active
+  - User: added questions_this_month, last_reset_date
+  - New: CollegePlan enum (free / pro)
+  - All other models unchanged
 """
 
 import enum
@@ -40,29 +35,41 @@ class DocType(str, enum.Enum):
     other     = "other"
 
 
+class CollegePlan(str, enum.Enum):
+    free = "free"   # 100 questions/student/month
+    pro  = "pro"    # unlimited (future paid tier)
+
+
 # ── Models ────────────────────────────────────────────────────────────
 class College(Base):
     """
-    Colleges registry.
-    Every user, document, and chat message is scoped to a college_id.
-    Adding a new college = inserting one row here.
+    [PHASE 8] Added:
+      - plan          : free or pro
+      - monthly_limit : max questions per student per month
+      - contact_email : for SaaS onboarding
+      - is_active     : can be disabled if unpaid
     """
     __tablename__ = "colleges"
 
-    id         = Column(Integer, primary_key=True, autoincrement=True)
-    name       = Column(String(200), unique=True, nullable=False)
-    code       = Column(String(50),  unique=True, nullable=False)  # e.g. "ABESEC"
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    name           = Column(String(200), unique=True, nullable=False)
+    code           = Column(String(50),  unique=True, nullable=False)
+    # [PHASE 8] SaaS fields
+    plan           = Column(Enum(CollegePlan), default=CollegePlan.free, nullable=False)
+    monthly_limit  = Column(Integer, default=100)   # questions per student per month
+    contact_email  = Column(String(200), nullable=True)
+    is_active      = Column(Boolean, default=True)
+    created_at     = Column(DateTime, default=datetime.utcnow)
 
-    # Relationships
     users     = relationship("User",     back_populates="college")
     documents = relationship("Document", back_populates="college")
 
 
 class User(Base):
     """
-    User account.
-    college_id enforces data isolation — users only see their college's data.
+    [PHASE 8] Added:
+      - questions_this_month : rolling counter, reset monthly
+      - last_reset_date      : tracks when counter was last reset
     """
     __tablename__ = "users"
 
@@ -74,8 +81,10 @@ class User(Base):
     college_id    = Column(Integer, ForeignKey("colleges.id"), nullable=False)
     is_active     = Column(Boolean, default=True)
     created_at    = Column(DateTime, default=datetime.utcnow)
+    # [PHASE 8] Usage tracking
+    questions_this_month = Column(Integer, default=0)
+    last_reset_date      = Column(String(10), default="")  # YYYY-MM stored as string
 
-    # Relationships
     college       = relationship("College",     back_populates="users")
     documents     = relationship("Document",    back_populates="uploader")
     chat_sessions = relationship("ChatSession", back_populates="user",
@@ -84,33 +93,23 @@ class User(Base):
 
 
 class Document(Base):
-    """
-    Uploaded document metadata.
-    Physical file lives at: uploads/{college_id}/{filename}
-    Vector chunks live in:  vector_store/{college_id}/
-    """
     __tablename__ = "documents"
 
     id            = Column(Integer, primary_key=True, autoincrement=True)
-    filename      = Column(String(255), nullable=False)        # stored filename (unique)
-    original_name = Column(String(255), nullable=False)        # original upload name
+    filename      = Column(String(255), nullable=False)
+    original_name = Column(String(255), nullable=False)
     doc_type      = Column(Enum(DocType), default=DocType.other, nullable=False)
     file_size_kb  = Column(Float,   nullable=True)
-    is_indexed    = Column(Boolean, default=False)             # True after RAG processing
+    is_indexed    = Column(Boolean, default=False)
     uploader_id   = Column(Integer, ForeignKey("users.id"),    nullable=False)
     college_id    = Column(Integer, ForeignKey("colleges.id"), nullable=False)
     created_at    = Column(DateTime, default=datetime.utcnow)
 
-    # Relationships
     uploader = relationship("User",    back_populates="documents")
     college  = relationship("College", back_populates="documents")
 
 
 class ChatSession(Base):
-    """
-    A named conversation thread belonging to one user.
-    One user can have many sessions (New Chat = new session).
-    """
     __tablename__ = "chat_sessions"
 
     id         = Column(Integer, primary_key=True, autoincrement=True)
@@ -119,7 +118,6 @@ class ChatSession(Base):
     title      = Column(String(200), default="New Chat")
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Relationships
     user     = relationship("User", back_populates="chat_sessions")
     messages = relationship("ChatMessage", back_populates="session",
                             cascade="all, delete-orphan",
@@ -127,36 +125,26 @@ class ChatSession(Base):
 
 
 class ChatMessage(Base):
-    """
-    A single message within a chat session.
-    sources stores JSON-serialised list of source metadata.
-    """
     __tablename__ = "chat_messages"
 
     id         = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, ForeignKey("chat_sessions.id"), nullable=False)
-    role       = Column(String(20), nullable=False)   # "user" | "assistant"
+    role       = Column(String(20), nullable=False)
     content    = Column(Text, nullable=False)
-    sources    = Column(Text, default="[]")            # JSON list of source dicts
+    sources    = Column(Text, default="[]")
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Relationships
     session = relationship("ChatSession", back_populates="messages")
 
 
 class AuditLog(Base):
-    """
-    Optional security audit trail.
-    Logs sensitive actions: login, upload, delete, role change.
-    """
     __tablename__ = "audit_logs"
 
     id         = Column(Integer, primary_key=True, autoincrement=True)
     user_id    = Column(Integer, ForeignKey("users.id"), nullable=True)
-    action     = Column(String(100), nullable=False)   # e.g. "document.upload"
-    detail     = Column(Text, nullable=True)           # JSON extra context
+    action     = Column(String(100), nullable=False)
+    detail     = Column(Text, nullable=True)
     ip_address = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Relationships
     user = relationship("User", back_populates="audit_logs")

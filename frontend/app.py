@@ -180,7 +180,20 @@ def render_app():
         if user["role"] in ("admin", "staff"):
             st.page_link("pages/admin.py", label="🛠️ Admin Panel", icon="🛠️")
 
-        if st.button("🚪 Log Out"):
+        # [PHASE 8] Show usage for students
+    if user["role"] == "student":
+        usage_resp = api_get("/auth/usage", token=token)
+        if usage_resp.status_code == 200:
+            usage = usage_resp.json()
+            used      = usage.get("used", 0)
+            limit     = usage.get("monthly_limit", 100)
+            remaining = usage.get("remaining", 100)
+            st.divider()
+            st.markdown("**📊 Monthly Usage**")
+            st.progress(used / limit if limit > 0 else 0)
+            st.caption(f"{used}/{limit} questions used · {remaining} remaining")
+
+    if st.button("🚪 Log Out"):
             for k in ["token", "user", "current_session_id", "messages"]:
                 st.session_state[k] = None if k != "messages" else []
             st.rerun()
