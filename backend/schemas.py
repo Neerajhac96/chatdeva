@@ -148,3 +148,50 @@ class AuditLogResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── [PHASE 8] SaaS — College plan + usage schemas ─────────────────────
+class CollegeRegisterRequest(BaseModel):
+    """Public college self-registration request."""
+    name:           str
+    code:           str
+    contact_email:  str
+    admin_username: str
+    admin_password: str
+
+    @field_validator("admin_password")
+    @classmethod
+    def password_min_length(cls, v):
+        if len(v) < 6:
+            raise ValueError("Password must be at least 6 characters.")
+        return v
+
+    @field_validator("code")
+    @classmethod
+    def code_uppercase(cls, v):
+        return v.strip().upper()
+
+
+class CollegeDetailResponse(BaseModel):
+    """Full college info including plan details."""
+    id:            int
+    name:          str
+    code:          str
+    plan:          str
+    monthly_limit: int
+    contact_email: Optional[str]
+    is_active:     bool
+    created_at:    datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UsageResponse(BaseModel):
+    """Student usage stats for the current month."""
+    username:      str
+    plan:          str
+    monthly_limit: int
+    used:          int
+    remaining:     int
+    reset_on:      str
+    is_admin:      bool

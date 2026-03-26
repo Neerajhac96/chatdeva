@@ -28,6 +28,7 @@ from models import User, College, UserRole, AuditLog
 from schemas import (
     RegisterRequest, LoginRequest, TokenResponse,
     UserResponse, CollegeResponse, CollegeCreate,
+    CollegeRegisterRequest, UsageResponse,
 )
 from dependencies import get_current_user, require_admin
 
@@ -200,11 +201,7 @@ def get_me(current_user: User = Depends(get_current_user)):
 # ── [PHASE 8] College self-registration ──────────────────────────────
 @router.post("/colleges/register", response_model=dict, status_code=201)
 def register_college(
-    name:          str,
-    code:          str,
-    contact_email: str,
-    admin_username: str,
-    admin_password: str,
+    payload: "CollegeRegisterRequest",
     db: Session = Depends(get_db),
 ):
     """
@@ -216,21 +213,21 @@ def register_college(
     This is the SaaS onboarding flow — no manual setup needed.
     """
     # Check college code not taken
-    if db.query(College).filter_by(code=code.upper()).first():
+    if db.query(College).filter_by(code=payload.code.upper()).first():
         raise HTTPException(status_code=400, detail="College code already exists.")
 
     # Check admin username not taken
-    if db.query(User).filter_by(username=admin_username).first():
+    if db.query(User).filter_by(username=payload.admin_username).first():
         raise HTTPException(status_code=400, detail="Admin username already taken.")
 
-    if len(admin_password) < 6:
+    if len(payload.admin_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
 
     # Create college
     college = College(
-        name=name,
-        code=code.upper(),
-        contact_email=contact_email,
+        name=payload.name,
+        code=payload.code.upper(),
+        contact_email=payload.contact_email,
     )
     db.add(college)
     db.commit()
@@ -238,12 +235,12 @@ def register_college(
 
     # Create admin for this college
     password_hash = bcrypt.hashpw(
-        admin_password.encode("utf-8"),
+        payload.admin_password.encode("utf-8"),
         bcrypt.gensalt(rounds=12),
     ).decode("utf-8")
 
     admin = User(
-        username=admin_username,
+        username=payload.admin_username,
         password_hash=password_hash,
         role=UserRole.admin,
         college_id=college.id,
@@ -259,12 +256,12 @@ def register_college(
         "college_code": college.code,
         "plan": "free",
         "monthly_limit": 100,
-        "admin_username": admin_username,
+        "admin_username": payload.admin_username,
     }
 
 
 # ── [PHASE 8] Usage endpoint ─────────────────────────────────────────
-@router.get("/usage", response_model=dict)
+@router.get("/usage", response_model=UsageResponse)
 def get_my_usage(
     current_user: User    = Depends(get_current_user),
     db:           Session = Depends(get_db),
