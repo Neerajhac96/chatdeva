@@ -329,7 +329,10 @@ def get_answer(query: str, college_id: int) -> dict:
     if not top_docs:
         top_docs = [doc for doc, _ in docs_with_scores]
 
-    context = "\n\n".join([doc.page_content for doc in top_docs])
+    # Truncate chunks to prevent Groq 400 Bad Request (context too long)
+    chunks = [doc.page_content[:400] for doc in top_docs]
+    context = "\n\n".join(chunks)[:3000]
+    logger.info(f"Context length: {len(context)} chars")
 
     # ── Step 4: Groq API with type context ───────────────────────────
     logger.info(f"🤖 Calling Groq (doc_type={doc_type})...")
