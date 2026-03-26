@@ -1,42 +1,44 @@
 """
 config.py — Centralised settings
 ---------------------------------
-Reads all configuration from environment variables.
-Railway injects DATABASE_URL and PORT automatically.
-All other vars must be set in Railway's Variables dashboard.
+Phase 2 changes:
+  - Added GROQ_API_KEY and GROQ_MODEL
+  - Removed LLM_MODEL and RERANKER_MODEL (no longer needed)
+  - HF_TOKEN kept for embeddings only
 """
 
 import os
 from dotenv import load_dotenv
 
-# Load .env in local dev — Railway injects vars directly, so this is a no-op in prod
 load_dotenv()
 
 
 class Settings:
     # ── Database ──────────────────────────────────────────────────────
-    # Railway auto-sets DATABASE_URL when you add a Postgres service.
-    # Format: postgresql://user:pass@host:port/dbname
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./chatdeva.db")
 
     # ── JWT ───────────────────────────────────────────────────────────
-    # Generate: python -c "import secrets; print(secrets.token_hex(32))"
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "change-this-in-production")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))
 
-    # ── HuggingFace ───────────────────────────────────────────────────
+    # ── HuggingFace (embeddings only — no local LLM anymore) ──────────
     HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 
+    # ── Groq API (replaces local Flan-T5) ─────────────────────────────
+    # Free tier: https://console.groq.com
+    # Generous limits: 14,400 requests/day, ~6000 tokens/min
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    # Best free model for Q&A tasks — fast and accurate
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+
     # ── File uploads ──────────────────────────────────────────────────
-    # On Railway, use /tmp for uploads (persistent volume optional)
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "/tmp/chatdeva_uploads")
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "20"))
     ALLOWED_EXTENSIONS: set = {".pdf", ".docx", ".txt"}
 
     # ── Vector store ──────────────────────────────────────────────────
     VECTOR_STORE_DIR: str = os.getenv("VECTOR_STORE_DIR", "/tmp/chatdeva_vectors")
-    # CHROMA_MODE: "local" for dev, "server" for Railway ChromaDB service
     CHROMA_MODE: str = os.getenv("CHROMA_MODE", "local")
     CHROMA_HOST: str = os.getenv("CHROMA_HOST", "localhost")
     CHROMA_PORT: int = int(os.getenv("CHROMA_PORT", "8000"))
@@ -46,23 +48,13 @@ class Settings:
     CHUNK_OVERLAP: int = 64
     RETRIEVAL_K: int = 5
     SIMILARITY_THRESHOLD: float = float(os.getenv("SIMILARITY_THRESHOLD", "1.0"))
-    RERANK_THRESHOLD: float = float(os.getenv("RERANK_THRESHOLD", "0.3"))
 
-    # ── Models ────────────────────────────────────────────────────────
+    # ── Embedding model (still local, lightweight ~100MB) ─────────────
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "google/flan-t5-large")
-    RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # ── URLs ──────────────────────────────────────────────────────────
-    # In production: set BACKEND_URL to your Railway backend public URL
-    # e.g. https://chatdeva-backend.up.railway.app
     BACKEND_URL: str = os.getenv("BACKEND_URL", "http://localhost:8000")
     FRONTEND_PORT: int = int(os.getenv("FRONTEND_PORT", "8501"))
-
-    # ── CORS ──────────────────────────────────────────────────────────
-    # Set ALLOWED_ORIGINS to your frontend Railway URL in production
-    # e.g. https://chatdeva-frontend.up.railway.app
-    # Use "*" only in development
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "*")
 
 

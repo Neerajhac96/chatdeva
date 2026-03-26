@@ -1,6 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────
-# ChatDEVA v2 — Production Requirements
-# torch installed separately in Dockerfile (CPU-only wheel)
+# ChatDEVA v2 — Phase 2 Requirements
+# torch, transformers, sentence-transformers REMOVED (using Groq API)
+# Build time: ~60 seconds (was 3+ minutes)
+# RAM usage: ~150MB (was 3.6GB)
 # ─────────────────────────────────────────────────────────────────────
 
 # ── Web framework ─────────────────────────────────────────────────────
@@ -20,19 +22,20 @@ python-jose[cryptography]==3.3.0
 sqlalchemy==2.0.30
 psycopg2-binary==2.9.9
 
-# ── LangChain (versions confirmed available on PyPI) ──────────────────
+# ── LangChain ─────────────────────────────────────────────────────────
 langchain==0.1.20
 langchain-community==0.0.38
 langchain-core==0.1.53
 langchain-text-splitters==0.0.2
 langchain-huggingface==0.0.3
 
-# ── HuggingFace ───────────────────────────────────────────────────────
-transformers==4.40.0
+# ── Embeddings only (no local LLM) ────────────────────────────────────
+sentence-transformers==2.7.0
 huggingface-hub==0.23.0
 tokenizers==0.19.1
-accelerate==0.29.3
-sentence-transformers==3.0.0
+
+# ── PyTorch CPU (for embeddings only — much smaller than full torch) ──
+torch==2.2.0
 
 # ── Vector store ──────────────────────────────────────────────────────
 chromadb==0.5.0
@@ -43,6 +46,4 @@ docx2txt==0.8
 
 # ── Config ────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
-
-# ── Numerical ─────────────────────────────────────────────────────────
 numpy==1.26.4

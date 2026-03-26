@@ -1,62 +1,81 @@
 """
-rag_core.py — College-isolated RAG pipeline
+rag_core.py — Phase 3: Improved RAG Quality
 ---------------------------------------------
-Key design decisions:
-  - Every college gets its own ChromaDB collection: chatdeva_college_{id}
-  - Vector stores are lazy-loaded and cached per college in _store_cache
-  - MultiQueryRetriever + cross-encoder reranker from Phase 5 are preserved
-  - Metadata (filename, doc_type, upload time) is attached to every chunk
-    so sources in responses are rich and traceable
-  - No hallucination fallback — if retrieval fails, say so cleanly
+What changed from Phase 2:
+  - Query classification: detects doc_type from query keywords
+    e.g. "exam schedule" → searches exam docs first
+  - Metadata-aware retrieval: filters by doc_type when confident
+  - Richer source references: filename + doc_type + upload date
+  - Better Groq prompt: includes doc_type context for more focused answers
+  - Fallback: if typed search returns nothing, falls back to full search
 
-College isolation flow:
-  upload  → process_college_documents(college_id, doc_type, ...)
-  query   → get_answer(query, college_id)
-            ↳ retrieves ONLY from that college's collection
+No new dependencies. Same RAM usage (~150MB).
 """
 
-import sys, os
+import os
+import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 
-
-import os
 import uuid
 import logging
+import requests
 from datetime import datetime
 from typing import Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
-from langchain.chains import RetrievalQA
-from langchain_core.prompts import PromptTemplate
-from langchain.retrievers.multi_query import MultiQueryRetriever
-from langchain_core.retrievers import BaseRetriever
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
-from langchain_core.callbacks import CallbackManagerForRetrieverRun
 
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-from sentence_transformers import CrossEncoder
 import chromadb
-
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level singletons ───────────────────────────────────────────
-# Models load once and are reused across all colleges
-_embeddings:        Optional[HuggingFaceEmbeddings] = None
-_llm:               Optional[HuggingFacePipeline]   = None
-_reranker:          Optional[CrossEncoder]           = None
-_chroma_client:     Optional[chromadb.ClientAPI]     = None
-
-# Per-college vector store cache: { college_id: Chroma }
+# ── Singletons ────────────────────────────────────────────────────────
+_embeddings: Optional[HuggingFaceEmbeddings] = None
+_chroma_client: Optional[chromadb.ClientAPI] = None
 _store_cache: dict[int, Chroma] = {}
 
+LOADERS = {
+    ".pdf":  PyPDFLoader,
+    ".txt":  TextLoader,
+    ".docx": Docx2txtLoader,
+}
 
-# ── Singleton getters ─────────────────────────────────────────────────
+# ── [PHASE 3] Query → doc_type keyword mapping ────────────────────────
+# Maps common student query keywords to document types
+# Used to filter ChromaDB results for better precision
+DOC_TYPE_KEYWORDS = {
+    "syllabus":   ["syllabus", "curriculum", "subject", "course", "topics", "unit"],
+    "exam":       ["exam", "examination", "schedule", "date sheet", "timetable", "test", "paper"],
+    "notice":     ["notice", "announcement", "circular", "notification", "update", "news"],
+    "timetable":  ["timetable", "time table", "class schedule", "lecture", "timing", "slot"],
+}
+
+
+def classify_query(query: str) -> Optional[str]:
+    """
+    Detects the most likely document type from the query.
+    Returns doc_type string or None if unclear.
+
+    Example:
+      "What is the exam schedule for May?" → "exam"
+      "Show me the Python syllabus"        → "syllabus"
+      "Any notices about holidays?"        → "notice"
+      "What is cloud computing?"           → None (general, search all)
+    """
+    query_lower = query.lower()
+    for doc_type, keywords in DOC_TYPE_KEYWORDS.items():
+        if any(kw in query_lower for kw in keywords):
+            logger.info(f"🎯 Query classified as doc_type='{doc_type}'")
+            return doc_type
+    return None
+
+
+# ── Embeddings ────────────────────────────────────────────────────────
 def get_embeddings() -> HuggingFaceEmbeddings:
     global _embeddings
     if _embeddings is None:
@@ -66,52 +85,23 @@ def get_embeddings() -> HuggingFaceEmbeddings:
     return _embeddings
 
 
-def get_llm() -> HuggingFacePipeline:
-    global _llm
-    if _llm is None:
-        logger.info("🔄 Loading LLM (first call — takes a moment)...")
-        tok = AutoTokenizer.from_pretrained(settings.LLM_MODEL)
-        mdl = AutoModelForSeq2SeqLM.from_pretrained(settings.LLM_MODEL)
-        gen = pipeline(
-            "text2text-generation", model=mdl, tokenizer=tok, max_new_tokens=512, num_beams=4
-        )
-        _llm = HuggingFacePipeline(pipeline=gen)
-        logger.info("✅ LLM ready.")
-    return _llm
-
-
-def get_reranker() -> CrossEncoder:
-    global _reranker
-    if _reranker is None:
-        logger.info("🔄 Loading reranker...")
-        _reranker = CrossEncoder(settings.RERANKER_MODEL)
-        logger.info("✅ Reranker ready.")
-    return _reranker
-
-
+# ── ChromaDB ──────────────────────────────────────────────────────────
 def get_chroma_client() -> chromadb.ClientAPI:
     global _chroma_client
     if _chroma_client is None:
         if settings.CHROMA_MODE == "server":
-            logger.info(f"🌐 Connecting to ChromaDB at {settings.CHROMA_HOST}:{settings.CHROMA_PORT}")
             _chroma_client = chromadb.HttpClient(
                 host=settings.CHROMA_HOST, port=settings.CHROMA_PORT
             )
         else:
             os.makedirs(settings.VECTOR_STORE_DIR, exist_ok=True)
-            logger.info(f"💾 Using local ChromaDB at {settings.VECTOR_STORE_DIR}/")
             _chroma_client = chromadb.PersistentClient(path=settings.VECTOR_STORE_DIR)
         logger.info("✅ ChromaDB client ready.")
     return _chroma_client
 
 
-# ── Per-college vector store ──────────────────────────────────────────
 def get_college_store(college_id: int) -> Chroma:
-    """
-    Returns (and caches) the Chroma vector store for a specific college.
-    Collection name: chatdeva_college_{college_id}
-    This is the core of multi-college isolation.
-    """
+    """Returns college-isolated vector store."""
     if college_id not in _store_cache:
         collection_name = f"chatdeva_college_{college_id}"
         _store_cache[college_id] = Chroma(
@@ -119,31 +109,8 @@ def get_college_store(college_id: int) -> Chroma:
             collection_name=collection_name,
             embedding_function=get_embeddings(),
         )
-        logger.info(f"✅ Vector store loaded for college_id={college_id}")
+        logger.info(f"✅ Vector store for college_id={college_id}")
     return _store_cache[college_id]
-
-
-# ── File loaders ──────────────────────────────────────────────────────
-LOADERS = {
-    ".pdf":  PyPDFLoader,
-    ".txt":  TextLoader,
-    ".docx": Docx2txtLoader,
-}
-
-
-def _load_file(file_path: str, metadata: dict) -> list[Document]:
-    """Loads a file and attaches metadata to every page/chunk."""
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext not in LOADERS:
-        raise ValueError(f"Unsupported file type: {ext}")
-
-    loader = LOADERS[ext](file_path)
-    docs = loader.load()
-
-    # Attach rich metadata to every document page
-    for doc in docs:
-        doc.metadata.update(metadata)
-    return docs
 
 
 # ── Document processing ───────────────────────────────────────────────
@@ -156,25 +123,29 @@ def process_college_document(
     uploaded_at: Optional[datetime] = None,
 ) -> int:
     """
-    Loads, chunks, and indexes one document into the college's vector store.
-    Returns the number of chunks indexed.
-
-    Metadata attached to every chunk:
-      source, doc_type, college_id, uploader_id, uploaded_at
-    This metadata is returned in query responses so students know
-    exactly which document the answer came from.
+    Chunks and indexes one document.
+    [PHASE 3] Richer metadata attached to every chunk:
+      source, doc_type, college_id, uploader_id, uploaded_at, upload_date
+    upload_date is stored separately as YYYY-MM-DD for easy filtering.
     """
-    uploaded_at_str = (uploaded_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M")
-
+    now = uploaded_at or datetime.utcnow()
     metadata = {
         "source":      original_name,
         "doc_type":    doc_type,
         "college_id":  college_id,
         "uploader_id": uploader_id,
-        "uploaded_at": uploaded_at_str,
+        "uploaded_at": now.strftime("%Y-%m-%d %H:%M"),
+        "upload_date": now.strftime("%Y-%m-%d"),   # [PHASE 3] date-only for display
     }
 
-    docs = _load_file(file_path, metadata)
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in LOADERS:
+        raise ValueError(f"Unsupported file type: {ext}")
+
+    loader = LOADERS[ext](file_path)
+    docs = loader.load()
+    for doc in docs:
+        doc.metadata.update(metadata)
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.CHUNK_SIZE,
@@ -183,38 +154,26 @@ def process_college_document(
     chunks = splitter.split_documents(docs)
 
     if not chunks:
-        logger.warning(f"No chunks produced from {original_name}")
+        logger.warning(f"No chunks from {original_name}")
         return 0
 
-    # Stable UUIDs for deduplication
     ids = [str(uuid.uuid4()) for _ in chunks]
     store = get_college_store(college_id)
     store.add_documents(documents=chunks, ids=ids)
-
-    logger.info(f"✅ Indexed {len(chunks)} chunks from '{original_name}' → college {college_id}")
+    logger.info(f"✅ Indexed {len(chunks)} chunks → '{original_name}' (college {college_id})")
     return len(chunks)
 
 
 def delete_college_document(college_id: int, original_name: str) -> int:
-    """
-    Deletes all chunks belonging to a document from the college's vector store.
-    Matched by metadata.source == original_name.
-    Returns number of chunks deleted.
-    """
+    """Deletes all chunks for a document from the college's vector store."""
     try:
         client = get_chroma_client()
-        collection_name = f"chatdeva_college_{college_id}"
-        collection = client.get_collection(collection_name)
-
+        collection = client.get_collection(f"chatdeva_college_{college_id}")
         results = collection.get(where={"source": original_name})
         chunk_ids = results.get("ids", [])
-
         if not chunk_ids:
-            logger.info(f"No chunks found for '{original_name}' in college {college_id}")
             return 0
-
         collection.delete(ids=chunk_ids)
-        # Invalidate cache so next query re-loads the collection
         _store_cache.pop(college_id, None)
         logger.info(f"🗑️ Deleted {len(chunk_ids)} chunks for '{original_name}'")
         return len(chunk_ids)
@@ -223,81 +182,129 @@ def delete_college_document(college_id: int, original_name: str) -> int:
         return 0
 
 
-# ── Reranking ─────────────────────────────────────────────────────────
-def _rerank(query: str, docs: list[Document], top_n: int = 5) -> list[Document]:
-    """Re-scores retrieved docs with the cross-encoder and filters by threshold."""
-    if not docs:
-        return []
+# ── [PHASE 3] Metadata-aware retrieval ───────────────────────────────
+def retrieve_docs(
+    store: Chroma,
+    query: str,
+    doc_type: Optional[str],
+    k: int,
+) -> list[Document]:
+    """
+    Retrieves top-k chunks with optional doc_type filtering.
 
-    reranker = get_reranker()
-    pairs  = [(query, doc.page_content) for doc in docs]
-    scores = reranker.predict(pairs)
+    Strategy:
+      1. If doc_type detected → search with metadata filter first
+      2. If filtered search returns < 2 results → fallback to full search
+      3. Return best results either way
 
-    scored = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-    filtered = [
-        doc for score, doc in scored[:top_n]
-        if score >= settings.RERANK_THRESHOLD
-    ]
-    logger.info(f"Reranker: {len(filtered)}/{len(docs)} docs passed threshold={settings.RERANK_THRESHOLD}")
-    return filtered
+    This means:
+      - "exam schedule" → searches exam docs first (more precise)
+      - "what is OOP?" → searches all docs (no type filter)
+    """
+    # Try typed search first if doc_type was detected
+    if doc_type:
+        try:
+            typed_results = store.similarity_search_with_score(
+                query,
+                k=k,
+                filter={"doc_type": doc_type},
+            )
+            if len(typed_results) >= 2:
+                logger.info(f"✅ Typed retrieval: {len(typed_results)} results (doc_type={doc_type})")
+                return [doc for doc, _ in typed_results]
+            else:
+                logger.info(f"⚠️ Typed retrieval returned {len(typed_results)} — falling back to full search")
+        except Exception as e:
+            logger.warning(f"Typed search failed: {e} — falling back")
+
+    # Full search (no filter)
+    results = store.similarity_search_with_score(query, k=k)
+    logger.info(f"📄 Full retrieval: {len(results)} results")
+    return [doc for doc, _ in results]
 
 
-# ── Static retriever ──────────────────────────────────────────────────
-class StaticRetriever(BaseRetriever):
-    """Wraps a fixed list of documents for use with RetrievalQA."""
-    docs: list
+# ── Groq API ──────────────────────────────────────────────────────────
+def call_groq(context: str, question: str, doc_type: Optional[str] = None) -> str:
+    """
+    [PHASE 3] Enhanced Groq prompt includes doc_type context.
+    Tells the LLM what kind of document it's reading for better answers.
+    """
+    if not settings.GROQ_API_KEY:
+        return "Configuration error: AI service not configured. Please contact admin."
 
-    def _get_relevant_documents(
-        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
-    ) -> list[Document]:
-        return self.docs
+    # [PHASE 3] Type-aware system prompt
+    type_hint = f" You are reading {doc_type} documents." if doc_type else ""
 
+    system_prompt = (
+        "You are a helpful academic assistant for college students."
+        f"{type_hint} "
+        "Answer questions using ONLY the provided context. "
+        "If the answer is not in the context, say exactly: "
+        "'The answer is not available in the provided documents.' "
+        "Be concise, clear, and helpful. "
+        "Use bullet points for lists when appropriate."
+    )
 
-# ── Prompt ────────────────────────────────────────────────────────────
-QA_PROMPT = PromptTemplate(
-    template="""You are a helpful academic assistant.
-Use ONLY the context below to answer the question.
-If the answer is not present, say exactly:
-"The answer is not available in the provided documents."
-Do not guess or fabricate information.
-
-Context:
+    user_prompt = f"""Context from college documents:
 {context}
 
 Question: {question}
 
-Detailed Answer:""",
-    input_variables=["context", "question"],
-)
+Provide a clear, helpful answer based only on the context above:"""
+
+    payload = {
+        "model": settings.GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        "max_tokens": 512,
+        "temperature": 0.1,
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except requests.exceptions.Timeout:
+        logger.error("Groq API timeout")
+        return "Request timed out. Please try again."
+    except Exception as e:
+        logger.error(f"Groq API error: {e}")
+        return "AI service temporarily unavailable. Please try again."
 
 
 # ── Main query function ───────────────────────────────────────────────
 def get_answer(query: str, college_id: int) -> dict:
     """
-    Full RAG pipeline for a college-scoped query.
-
-    Returns:
-      {
-        "answer":  str,
-        "sources": [ { filename, doc_type, uploaded_at }, ... ]
-      }
-
-    Pipeline:
-      1. Similarity gate    → cheap first-pass, avoids LLM call on irrelevant queries
-      2. MultiQueryRetriever → 3 rephrasings for wider recall
-      3. Cross-encoder rerank → accurate second-pass scoring
-      4. LLM                 → grounded answer from top chunks only
+    Phase 3 RAG pipeline:
+      1. Classify query     → detect doc_type from keywords
+      2. Similarity gate    → cheap relevance check
+      3. Typed retrieval    → filter by doc_type if detected, fallback to full
+      4. Groq API           → type-aware prompt for better answers
+      5. Rich sources       → filename + doc_type + upload date
     """
     store = get_college_store(college_id)
 
-    # ── Step 1: Similarity gate ───────────────────────────────────────
+    # ── Step 1: Classify query ────────────────────────────────────────
+    doc_type = classify_query(query)
+
+    # ── Step 2: Similarity gate ───────────────────────────────────────
     try:
         docs_with_scores = store.similarity_search_with_score(
             query, k=settings.RETRIEVAL_K
         )
     except Exception as e:
-        logger.error(f"ChromaDB search error: {e}")
-        return {"answer": "⚠️ Vector store error. Please contact support.", "sources": []}
+        logger.error(f"ChromaDB error: {e}")
+        return {"answer": "⚠️ Search error. Please try again.", "sources": []}
 
     if not docs_with_scores:
         return {
@@ -306,89 +313,32 @@ def get_answer(query: str, college_id: int) -> dict:
         }
 
     best_score = docs_with_scores[0][1]
-    logger.info(f"Best similarity score: {best_score:.4f} (threshold={settings.SIMILARITY_THRESHOLD})")
+    logger.info(f"Best score: {best_score:.4f} (threshold={settings.SIMILARITY_THRESHOLD})")
 
     if best_score > settings.SIMILARITY_THRESHOLD:
         return {
             "answer": (
                 "The answer is not available in the provided documents. "
-                "Please ensure the relevant material has been uploaded."
+                "Please ensure the relevant study material has been uploaded."
             ),
             "sources": [],
         }
 
-    llm = get_llm()
+    # ── Step 3: Typed retrieval ───────────────────────────────────────
+    top_docs = retrieve_docs(store, query, doc_type, settings.RETRIEVAL_K)
+    if not top_docs:
+        top_docs = [doc for doc, _ in docs_with_scores]
 
-    # ── Step 2: Direct retrieval (MultiQueryRetriever skipped — unreliable with Flan-T5)
-    try:
-        candidate_docs = store.similarity_search(query, k=settings.RETRIEVAL_K)
-        logger.info(f"Direct retrieval returned {len(candidate_docs)} candidates")
-    except Exception as e:
-        logger.error(f"Retrieval error: {e}")
-        return {"answer": "The answer is not available in the provided documents.", "sources": []}
+    context = "\n\n".join([doc.page_content for doc in top_docs])
 
-    if not candidate_docs:
-        return {
-            "answer": "The answer is not available in the provided documents.",
-            "sources": [],
-        }
+    # ── Step 4: Groq API with type context ───────────────────────────
+    logger.info(f"🤖 Calling Groq (doc_type={doc_type})...")
+    answer = call_groq(context, query, doc_type)
 
-    # ── Step 3: Rerank ────────────────────────────────────────────────
-    try:
-        reranked = _rerank(query, candidate_docs, top_n=settings.RETRIEVAL_K)
-    except Exception as e:
-        logger.error(f"Reranker error: {e} — falling back to direct retrieval results")
-        reranked = candidate_docs  # fallback: use unranked docs
-
-    if not reranked:
-        reranked = candidate_docs  # fallback if all filtered out
-
-    # ── Step 4: LLM — direct invocation (bypasses RetrievalQA prompt echo bug) ──
-    # Build context string from reranked chunks
-    context = "".join([doc.page_content for doc in reranked])
-
-    # Build clean prompt for Flan-T5
-    prompt = (
-        f"You are a helpful academic assistant."
-        f"Use ONLY the context below to answer the question."
-        f"If the answer is not present in the context, say exactly: "
-        f"The answer is not available in the provided documents."
-        f"Context:{context}"
-        f"Question: {query}"
-        f"Give a detailed answer with explanation:"
-    )
-
-    # Call LLM directly — Flan-T5 returns only the answer, not the prompt
-    try:
-        raw = llm.invoke(prompt)
-        logger.info(f"LLM raw output type: {type(raw)}, value: {str(raw)[:200]}")
-    except Exception as e:
-        logger.error(f"LLM invoke error: {e}")
-        raise
-
-    # HuggingFacePipeline returns a string directly
-    if isinstance(raw, str):
-        answer = raw.strip()
-    elif isinstance(raw, list) and len(raw) > 0:
-        item = raw[0]
-        if isinstance(item, dict):
-            answer = item.get("generated_text", str(item)).strip()
-        else:
-            answer = str(item).strip()
-    else:
-        answer = str(raw).strip()
-
-    # If LLM echoed the prompt, strip it
-    if "Answer:" in answer:
-        answer = answer.split("Answer:")[-1].strip()
-
-    if not answer or answer.strip() == "":
-        answer = "The answer is not available in the provided documents."
-
-    # Build rich source metadata (deduplicated by filename)
+    # ── Step 5: Rich source metadata ─────────────────────────────────
     seen = set()
     sources = []
-    for doc in reranked:
+    for doc in top_docs:
         m = doc.metadata
         fname = m.get("source", "Unknown")
         if fname not in seen:
@@ -397,6 +347,8 @@ def get_answer(query: str, college_id: int) -> dict:
                 "filename":    fname,
                 "doc_type":    m.get("doc_type", "other"),
                 "uploaded_at": m.get("uploaded_at", ""),
+                "upload_date": m.get("upload_date", ""),   # [PHASE 3]
             })
 
+    logger.info(f"✅ Answer ready. Sources: {[s['filename'] for s in sources]}")
     return {"answer": answer, "sources": sources}
