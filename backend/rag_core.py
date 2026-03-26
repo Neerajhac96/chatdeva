@@ -278,7 +278,12 @@ Provide a clear, helpful answer based only on the context above:"""
         logger.error("Groq API timeout")
         return "Request timed out. Please try again."
     except Exception as e:
-        logger.error(f"Groq API error: {e}")
+        # Log full response body to diagnose exact Groq error
+        try:
+            error_body = resp.json()
+            logger.error(f"Groq API error: {e} | Response: {error_body}")
+        except Exception:
+            logger.error(f"Groq API error: {e}")
         return "AI service temporarily unavailable. Please try again."
 
 
