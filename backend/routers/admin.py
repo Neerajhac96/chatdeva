@@ -217,3 +217,105 @@ def get_audit_log(
         .limit(limit)
         .all()
     )
+
+
+# ── [PHASE 6] Analytics ───────────────────────────────────────────────
+from sqlalchemy import func, desc
+from collections import Counter
+import json
+
+@router.get("/analytics", tags=["Admin"])
+def get_analytics(
+    db:           Session = Depends(get_db),
+    current_user: User    = Depends(require_admin),
+):
+    """
+    [PHASE 6] Analytics dashboard data for the admin's college.
+
+    Returns:
+      - total_users        : number of registered users
+      - total_questions    : total questions asked
+      - total_sessions     : total chat sessions
+      - recent_queries     : last 10 student questions
+      - top_questions      : most frequently asked questions (top 10)
+      - queries_today      : number of queries asked today
+      - most_active_users  : top 5 users by query count
+    """
+    from datetime import date, datetime
+
+    # Get all user IDs in this college
+    college_users = db.query(User).filter_by(
+        college_id=current_user.college_id
+    ).all()
+    college_user_ids = [u.id for u in college_users]
+
+    # All sessions in this college
+    sessions = db.query(ChatSession).filter(
+        ChatSession.college_id == current_user.college_id
+    ).all()
+    session_ids = [s.id for s in sessions]
+
+    # All user messages (questions only, not assistant responses)
+    all_questions = db.query(ChatMessage).filter(
+        ChatMessage.session_id.in_(session_ids),
+        ChatMessage.role == "user",
+    ).order_by(ChatMessage.created_at.desc()).all()
+
+    # ── Total counts ──────────────────────────────────────────────────
+    total_users     = len(college_users)
+    total_questions = len(all_questions)
+    total_sessions  = len(sessions)
+
+    # ── Recent queries (last 10) ──────────────────────────────────────
+    recent_queries = [
+        {
+            "question":   msg.content[:120],
+            "asked_at":   msg.created_at.strftime("%b %d, %H:%M"),
+            "session_id": msg.session_id,
+        }
+        for msg in all_questions[:10]
+    ]
+
+    # ── Top questions (most repeated) ─────────────────────────────────
+    # Normalize questions: lowercase + strip whitespace for grouping
+    question_texts = [msg.content.strip().lower() for msg in all_questions]
+    question_counts = Counter(question_texts).most_common(10)
+    top_questions = [
+        {"question": q[:100], "count": c}
+        for q, c in question_counts
+    ]
+
+    # ── Queries today ─────────────────────────────────────────────────
+    today_str = date.today().strftime("%Y-%m-%d")
+    queries_today = sum(
+        1 for msg in all_questions
+        if msg.created_at.strftime("%Y-%m-%d") == today_str
+    )
+
+    # ── Most active users ─────────────────────────────────────────────
+    # Count questions per session, map back to users
+    session_user_map = {s.id: s.user_id for s in sessions}
+    user_question_counts: dict[int, int] = {}
+    for msg in all_questions:
+        uid = session_user_map.get(msg.session_id)
+        if uid:
+            user_question_counts[uid] = user_question_counts.get(uid, 0) + 1
+
+    user_map = {u.id: u.username for u in college_users}
+    most_active = sorted(
+        user_question_counts.items(), key=lambda x: x[1], reverse=True
+    )[:5]
+    most_active_users = [
+        {"username": user_map.get(uid, f"User#{uid}"), "questions": count}
+        for uid, count in most_active
+    ]
+
+    return {
+        "total_users":       total_users,
+        "total_questions":   total_questions,
+        "total_sessions":    total_sessions,
+        "queries_today":     queries_today,
+        "recent_queries":    recent_queries,
+        "top_questions":     top_questions,
+        "most_active_users": most_active_users,
+    }

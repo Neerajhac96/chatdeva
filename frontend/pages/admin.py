@@ -72,11 +72,12 @@ st.caption(
 )
 
 # ── Tabs ──────────────────────────────────────────────────────────────
-tab_docs, tab_users, tab_chats, tab_audit = st.tabs([
+tab_docs, tab_users, tab_chats, tab_audit, tab_analytics = st.tabs([
     "📄 Documents",
     "👥 Users",
     "💬 Chat Monitor",
     "📋 Audit Log",
+    "📊 Analytics",
 ])
 
 
@@ -318,3 +319,73 @@ with tab_audit:
                     st.markdown(f"`{log['action']}`")
                 with col3:
                     st.caption(log.get("detail") or "—")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TAB 5 — ANALYTICS [PHASE 6]
+# ─────────────────────────────────────────────────────────────────────
+with tab_analytics:
+    st.subheader("📊 Usage Analytics")
+    st.markdown("Real-time insights into how students are using ChatDEVA.")
+
+    analytics_resp = api_get("/admin/analytics", token=token)
+    if analytics_resp.status_code != 200:
+        st.error("Could not load analytics.")
+    else:
+        data = analytics_resp.json()
+
+        # ── Top metrics row ───────────────────────────────────────────
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("👥 Total Users",     data.get("total_users", 0))
+        with col2:
+            st.metric("💬 Total Questions", data.get("total_questions", 0))
+        with col3:
+            st.metric("🗂️ Total Sessions",  data.get("total_sessions", 0))
+        with col4:
+            st.metric("📅 Queries Today",   data.get("queries_today", 0))
+
+        st.divider()
+
+        col_left, col_right = st.columns(2)
+
+        # ── Most active users ─────────────────────────────────────────
+        with col_left:
+            st.subheader("🏆 Most Active Users")
+            active_users = data.get("most_active_users", [])
+            if not active_users:
+                st.info("No activity yet.")
+            else:
+                for i, u in enumerate(active_users, 1):
+                    st.markdown(
+                        f"**{i}. {u['username']}** — "
+                        f"`{u['questions']}` question(s)"
+                    )
+
+        # ── Top questions ─────────────────────────────────────────────
+        with col_right:
+            st.subheader("🔥 Most Asked Questions")
+            top_qs = data.get("top_questions", [])
+            if not top_qs:
+                st.info("No questions yet.")
+            else:
+                for q in top_qs:
+                    st.markdown(
+                        f"- {q['question'][:80]}... "
+                        f"*(asked {q['count']}x)*"
+                    )
+
+        st.divider()
+
+        # ── Recent queries ────────────────────────────────────────────
+        st.subheader("🕐 Recent Queries")
+        recent = data.get("recent_queries", [])
+        if not recent:
+            st.info("No queries yet.")
+        else:
+            for q in recent:
+                col_a, col_b = st.columns([5, 1])
+                with col_a:
+                    st.markdown(f"❓ {q['question']}")
+                with col_b:
+                    st.caption(q["asked_at"])
