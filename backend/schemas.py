@@ -152,7 +152,8 @@ class AuditLogResponse(BaseModel):
 
 # ── [PHASE 8] SaaS — College plan + usage schemas ─────────────────────
 class CollegeRegisterRequest(BaseModel):
-    """Public college self-registration request."""
+    """Invite-token protected college registration request."""
+    invite_token:   str        # Required — get from super_admin via /admin/create-invite
     name:           str
     code:           str
     contact_email:  str

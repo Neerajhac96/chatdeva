@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
 from config import settings
-from models import Base, College, User, UserRole
+from models import Base, College, User, UserRole, CollegeInvite
 import bcrypt
 
 logger = logging.getLogger(__name__)
@@ -48,13 +48,52 @@ def get_db():
 
 
 # ── Initialisation ────────────────────────────────────────────────────
+def _run_migrations():
+    """
+    Adds new columns to existing tables safely.
+    Uses IF NOT EXISTS (Postgres) or try/except (SQLite).
+    Safe to run on every startup — skips already-existing columns.
+    """
+    from sqlalchemy import text
+    is_postgres = "postgresql" in settings.DATABASE_URL
+
+    if is_postgres:
+        migrations = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS questions_this_month INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_reset_date VARCHAR(10) DEFAULT ''",
+            "ALTER TABLE colleges ADD COLUMN IF NOT EXISTS plan VARCHAR(20) DEFAULT 'free'",
+            "ALTER TABLE colleges ADD COLUMN IF NOT EXISTS monthly_limit INTEGER DEFAULT 100",
+            "ALTER TABLE colleges ADD COLUMN IF NOT EXISTS contact_email VARCHAR(200)",
+            "ALTER TABLE colleges ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+        ]
+    else:
+        migrations = [
+            "ALTER TABLE users ADD COLUMN questions_this_month INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_reset_date VARCHAR(10) DEFAULT ''",
+            "ALTER TABLE colleges ADD COLUMN plan VARCHAR(20) DEFAULT 'free'",
+            "ALTER TABLE colleges ADD COLUMN monthly_limit INTEGER DEFAULT 100",
+            "ALTER TABLE colleges ADD COLUMN contact_email VARCHAR(200)",
+            "ALTER TABLE colleges ADD COLUMN is_active BOOLEAN DEFAULT 1",
+        ]
+
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception as e:
+                if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                    logger.warning(f"Migration skipped: {e}")
+
+
 def init_db():
     """
-    Creates all tables and seeds default data if the DB is empty.
-    Called once at FastAPI startup.
+    Creates all tables, runs migrations, and seeds default data.
+    Called once at FastAPI startup. Safe to run repeatedly.
     """
     logger.info("Initialising database...")
     Base.metadata.create_all(bind=engine)
+    _run_migrations()
 
     db = SessionLocal()
     try:
@@ -80,7 +119,7 @@ def _seed_default_data(db: Session):
         db.refresh(college)
         logger.info(f"✅ Seeded default college: id={college.id}")
 
-    # Default admin
+    # Default admin for the default college
     admin = db.query(User).filter_by(username="admin").first()
     if not admin:
         password_hash = bcrypt.hashpw(
@@ -96,3 +135,24 @@ def _seed_default_data(db: Session):
         db.commit()
         logger.info("✅ Seeded default admin (username=admin, password=admin123)")
         logger.warning("⚠️  CHANGE THE DEFAULT ADMIN PASSWORD before going to production!")
+
+    # [SECURITY] Super admin — controls system-wide invites
+    # Username from env var, defaults to "superadmin"
+    import os
+    super_username = os.getenv("SUPER_ADMIN_USERNAME", "superadmin")
+    super_password = os.getenv("SUPER_ADMIN_PASSWORD", "superadmin123")
+    super_admin = db.query(User).filter_by(username=super_username).first()
+    if not super_admin:
+        super_hash = bcrypt.hashpw(
+            super_password.encode("utf-8"), bcrypt.gensalt(rounds=12)
+        ).decode("utf-8")
+        super_admin = User(
+            username=super_username,
+            password_hash=super_hash,
+            role=UserRole.super_admin,
+            college_id=college.id,
+        )
+        db.add(super_admin)
+        db.commit()
+        logger.info(f"✅ Seeded super admin (username={super_username})")
+        logger.warning("⚠️  SET SUPER_ADMIN_USERNAME and SUPER_ADMIN_PASSWORD env vars in production!")

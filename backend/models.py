@@ -22,9 +22,10 @@ Base = declarative_base()
 
 # ── Enums ─────────────────────────────────────────────────────────────
 class UserRole(str, enum.Enum):
-    admin   = "admin"
-    staff   = "staff"
-    student = "student"
+    super_admin = "super_admin"  # [SECURITY] Controls invites + system-wide settings
+    admin       = "admin"        # Controls their college
+    staff       = "staff"        # Manages documents in their college
+    student     = "student"      # Chat only
 
 
 class DocType(str, enum.Enum):
@@ -148,3 +149,20 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="audit_logs")
+
+
+class CollegeInvite(Base):
+    """
+    [SECURITY] Invite token required to register a new college.
+    Only super_admin can create invites.
+    Each token is single-use and expires after 7 days.
+    """
+    __tablename__ = "college_invites"
+
+    id         = Column(Integer,     primary_key=True, autoincrement=True)
+    token      = Column(String(100), unique=True, nullable=False, index=True)
+    email      = Column(String(200), nullable=True)   # optional — who it was sent to
+    is_used    = Column(Boolean,     default=False)
+    expires_at = Column(DateTime,    nullable=False)
+    created_at = Column(DateTime,    default=datetime.utcnow)
+    created_by = Column(Integer,     ForeignKey("users.id"), nullable=True)

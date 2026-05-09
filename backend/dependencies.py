@@ -95,9 +95,23 @@ def get_current_user(
 
 
 # ── Role guards ───────────────────────────────────────────────────────
+def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
+    """
+    [SECURITY] Allows only SUPER_ADMIN.
+    Used for: creating college invites, system-wide operations.
+    College admins cannot access these endpoints.
+    """
+    if current_user.role != UserRole.super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super admin access required.",
+        )
+    return current_user
+
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Allows only ADMIN. Used for destructive or system-level operations."""
-    if current_user.role != UserRole.admin:
+    """Allows ADMIN or SUPER_ADMIN."""
+    if current_user.role not in (UserRole.admin, UserRole.super_admin):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required.",

@@ -32,7 +32,7 @@ from schemas import (
     UserResponse, RoleUpdateRequest,
     SessionResponse, MessageResponse, AuditLogResponse,
 )
-from dependencies import require_admin, assert_same_college
+from dependencies import require_admin, require_super_admin, assert_same_college
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -319,3 +319,73 @@ def get_analytics(
         "top_questions":     top_questions,
         "most_active_users": most_active_users,
     }
+
+
+# ── [SECURITY] College Invite System ────────────────────────────────
+import secrets
+from datetime import timedelta
+from models import CollegeInvite
+
+@router.post("/create-invite", tags=["Admin"])
+def create_college_invite(
+    email:        str | None = None,
+    expires_days: int        = 7,
+    db:           Session    = Depends(get_db),
+    current_user: User       = Depends(require_super_admin),
+):
+    """
+    [SECURITY] Super admin only — generates a secure invite token.
+    Token allows ONE college to be registered.
+    Expires after `expires_days` days (default: 7).
+
+    Returns the full invite URL to share with the college admin.
+    """
+    from config import settings
+
+    token      = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(days=expires_days)
+
+    invite = CollegeInvite(
+        token=token,
+        email=email,
+        is_used=False,
+        expires_at=expires_at,
+        created_by=current_user.id,
+    )
+    db.add(invite)
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="invite.create",
+        detail=f"email={email}, expires={expires_at.date()}",
+    ))
+    db.commit()
+
+    invite_url = f"{settings.BACKEND_URL.replace('8000', '3000')}/create-college?token={token}"
+    logger.info(f"✅ Invite created by {current_user.username} → {token[:8]}...")
+
+    return {
+        "token":      token,
+        "invite_url": invite_url,
+        "expires_at": str(expires_at.date()),
+        "email":      email,
+    }
+
+
+@router.get("/invites", tags=["Admin"])
+def list_invites(
+    db:           Session = Depends(get_db),
+    current_user: User    = Depends(require_super_admin),
+):
+    """Super admin only — lists all invites with their status."""
+    invites = db.query(CollegeInvite).order_by(CollegeInvite.created_at.desc()).all()
+    return [
+        {
+            "id":         i.id,
+            "token":      i.token[:8] + "...",   # masked for security
+            "email":      i.email,
+            "is_used":    i.is_used,
+            "expires_at": str(i.expires_at.date()),
+            "created_at": str(i.created_at.date()),
+        }
+        for i in invites
+    ]
